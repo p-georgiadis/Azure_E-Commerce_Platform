@@ -1,0 +1,147 @@
+# Kustomization for Staging environment
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  name: ecommerce-platform-staging
+  annotations:
+    description: "Staging environment configuration for E-Commerce Platform"
+
+# Base resources to include
+bases:
+  - ../../base
+
+# Environment-specific labels
+commonLabels:
+  environment: staging
+  tier: staging
+
+# Environment-specific annotations
+commonAnnotations:
+  environment: staging
+  cost-center: "staging"
+  team: "platform-engineering"
+
+# Namespace suffix for staging
+namePrefix: ""
+nameSuffix: "-staging"
+
+# Staging-specific images with tags
+images:
+  - name: PLACEHOLDER_ACR_NAME.azurecr.io/product-service
+    newTag: staging-latest
+  - name: PLACEHOLDER_ACR_NAME.azurecr.io/order-service
+    newTag: staging-latest
+  - name: PLACEHOLDER_ACR_NAME.azurecr.io/payment-service
+    newTag: staging-latest
+  - name: PLACEHOLDER_ACR_NAME.azurecr.io/notification-service
+    newTag: staging-latest
+  - name: PLACEHOLDER_ACR_NAME.azurecr.io/frontend-service
+    newTag: staging-latest
+
+# Staging resource scaling (production-like but smaller)
+replicas:
+  - name: product-service
+    count: 2
+  - name: order-service
+    count: 2
+  - name: payment-service
+    count: 2
+  - name: notification-service
+    count: 2
+  - name: frontend-service
+    count: 2
+  - name: api-gateway
+    count: 2
+
+# Staging-specific patches
+patchesStrategicMerge:
+  - staging-resources.yaml
+  - staging-ingress.yaml
+  - staging-config.yaml
+
+# JSON patches for fine-grained modifications
+patches:
+  # Set staging-specific resource limits
+  - target:
+      kind: Deployment
+      name: ".*"
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "200Mi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "200m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "400Mi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "400m"
+  
+  # Set staging logging
+  - target:
+      kind: ConfigMap
+      name: ecommerce-config
+    patch: |
+      - op: replace
+        path: /data/LOG_LEVEL
+        value: "info"
+      - op: replace
+        path: /data/NODE_ENV
+        value: "staging"
+  
+  # Enable SSL for staging
+  - target:
+      kind: Ingress
+      name: ecommerce-ingress
+    patch: |
+      - op: replace
+        path: /metadata/annotations/nginx.ingress.kubernetes.io~1ssl-redirect
+        value: "true"
+      - op: replace
+        path: /metadata/annotations/nginx.ingress.kubernetes.io~1force-ssl-redirect
+        value: "true"
+      - op: replace
+        path: /metadata/annotations/cert-manager.io~1cluster-issuer
+        value: "letsencrypt-staging"
+
+# Staging-specific ConfigMap generators
+configMapGenerator:
+  - name: staging-config
+    literals:
+      - DEBUG_MODE="false"
+      - METRICS_ENABLED="true"
+      - TRACING_ENABLED="true"
+      - CORS_ORIGINS="https://staging-ecommerce.example.com"
+      - RATE_LIMIT_ENABLED="true"
+      - ENVIRONMENT="staging"
+      - DOMAIN="staging-ecommerce.example.com"
+    options:
+      disableNameSuffixHash: true
+
+# Staging-specific variables
+vars:
+  - name: DOMAIN
+    objref:
+      kind: ConfigMap
+      name: staging-config
+      apiVersion: v1
+    fieldref:
+      fieldpath: data.DOMAIN
+  - name: ENVIRONMENT
+    objref:
+      kind: ConfigMap
+      name: staging-config
+      apiVersion: v1
+    fieldref:
+      fieldpath: data.ENVIRONMENT
+
+# Generator options
+generatorOptions:
+  disableNameSuffixHash: false
+  labels:
+    environment: staging
+  annotations:
+    environment: staging

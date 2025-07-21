@@ -1,0 +1,107 @@
+# ServiceAccount for all services
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ecommerce-service-account
+  namespace: ecommerce-platform
+  labels:
+    app.kubernetes.io/name: ecommerce-platform
+    app.kubernetes.io/component: rbac
+  annotations:
+    azure.workload.identity/client-id: "PLACEHOLDER_MANAGED_IDENTITY_CLIENT_ID"
+auto­ountServiceAccountToken: true
+---
+# ClusterRole for accessing Azure resources
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ecommerce-cluster-role
+  labels:
+    app.kubernetes.io/name: ecommerce-platform
+    app.kubernetes.io/component: rbac
+rules:
+# Permissions for secrets-store CSI driver
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+# Permissions for service mesh (if using Istio/Linkerd)
+- apiGroups: [""]
+  resources: ["services", "endpoints"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch"]
+# Permissions for monitoring
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["nodes", "pods"]
+  verbs: ["get", "list"]
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ecommerce-cluster-role-binding
+  labels:
+    app.kubernetes.io/name: ecommerce-platform
+    app.kubernetes.io/component: rbac
+subjects:
+- kind: ServiceAccount
+  name: ecommerce-service-account
+  namespace: ecommerce-platform
+roleRef:
+  kind: ClusterRole
+  name: ecommerce-cluster-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# Role for namespace-specific permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: ecommerce-platform
+  name: ecommerce-namespace-role
+  labels:
+    app.kubernetes.io/name: ecommerce-platform
+    app.kubernetes.io/component: rbac
+rules:
+# Permissions for reading ConfigMaps and Secrets
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]
+# Permissions for creating/managing pods and services (for debugging)
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "pods/exec"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list", "watch"]
+# Permissions for managing deployments (for CI/CD)
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+---
+# RoleBinding for namespace permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ecommerce-namespace-role-binding
+  namespace: ecommerce-platform
+  labels:
+    app.kubernetes.io/name: ecommerce-platform
+    app.kubernetes.io/component: rbac
+subjects:
+- kind: ServiceAccount
+  name: ecommerce-service-account
+  namespace: ecommerce-platform
+roleRef:
+  kind: Role
+  name: ecommerce-namespace-role
+  apiGroup: rbac.authorization.k8s.io

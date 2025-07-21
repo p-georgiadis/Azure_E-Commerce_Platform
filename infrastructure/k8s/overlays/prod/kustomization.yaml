@@ -1,0 +1,198 @@
+# Kustomization for Production environment
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  name: ecommerce-platform-prod
+  annotations:
+    description: "Production environment configuration for E-Commerce Platform"
+
+# Base resources to include
+bases:
+  - ../../base
+
+# Environment-specific labels
+commonLabels:
+  environment: prod
+  tier: production
+
+# Environment-specific annotations
+commonAnnotations:
+  environment: production
+  cost-center: "production"
+  team: "platform-engineering"
+  backup-policy: "daily"
+  monitoring: "enhanced"
+
+# No prefix/suffix for production (clean names)
+namePrefix: ""
+nameSuffix: ""
+
+# Production images with stable tags
+images:
+  - name: PLACEHOLDER_ACR_NAME.azurecr.io/product-service
+    newTag: v1.0.0
+  - name: PLACEHOLDER_ACR_NAME.azurecr.io/order-service
+    newTag: v1.0.0
+  - name: PLACEHOLDER_ACR_NAME.azurecr.io/payment-service
+    newTag: v1.0.0
+  - name: PLACEHOLDER_ACR_NAME.azurecr.io/notification-service
+    newTag: v1.0.0
+  - name: PLACEHOLDER_ACR_NAME.azurecr.io/frontend-service
+    newTag: v1.0.0
+
+# Production resource scaling
+replicas:
+  - name: product-service
+    count: 3
+  - name: order-service
+    count: 3
+  - name: payment-service
+    count: 3
+  - name: notification-service
+    count: 2
+  - name: frontend-service
+    count: 5
+  - name: api-gateway
+    count: 3
+
+# Production-specific patches
+patchesStrategicMerge:
+  - prod-resources.yaml
+  - prod-ingress.yaml
+  - prod-config.yaml
+  - prod-security.yaml
+  - prod-monitoring.yaml
+
+# JSON patches for production hardening
+patches:
+  # Set production resource allocations
+  - target:
+      kind: Deployment
+      name: ".*service.*"
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "512Mi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "500m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "1Gi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "1000m"
+  
+  # Frontend gets different resources
+  - target:
+      kind: Deployment
+      name: frontend-service
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "256Mi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "200m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "512Mi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "400m"
+  
+  # Production logging configuration
+  - target:
+      kind: ConfigMap
+      name: ecommerce-config
+    patch: |
+      - op: replace
+        path: /data/LOG_LEVEL
+        value: "warn"
+      - op: replace
+        path: /data/NODE_ENV
+        value: "production"
+  
+  # Production SSL configuration
+  - target:
+      kind: Ingress
+      name: ecommerce-ingress
+    patch: |
+      - op: replace
+        path: /metadata/annotations/cert-manager.io~1cluster-issuer
+        value: "letsencrypt-prod"
+      - op: add
+        path: /metadata/annotations/nginx.ingress.kubernetes.io~1server-snippet
+        value: |
+          # Security headers for production
+          add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+          add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://api.applicationinsights.io;" always;
+          add_header X-Content-Type-Options "nosniff" always;
+          add_header X-Frame-Options "DENY" always;
+          add_header X-XSS-Protection "1; mode=block" always;
+          add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+  
+  # Enable PodDisruptionBudgets for high availability
+  - target:
+      kind: Deployment
+      name: ".*"
+    patch: |
+      - op: add
+        path: /spec/strategy/rollingUpdate/maxUnavailable
+        value: "25%"
+      - op: add
+        path: /spec/strategy/rollingUpdate/maxSurge
+        value: "25%"
+
+# Production-specific ConfigMap generators
+configMapGenerator:
+  - name: prod-config
+    literals:
+      - DEBUG_MODE="false"
+      - METRICS_ENABLED="true"
+      - TRACING_ENABLED="true"
+      - CORS_ORIGINS="https://ecommerce-platform.com"
+      - RATE_LIMIT_ENABLED="true"
+      - ENVIRONMENT="production"
+      - DOMAIN="ecommerce-platform.com"
+      - SECURITY_HEADERS="strict"
+      - SESSION_SECURITY="high"
+    options:
+      disableNameSuffixHash: true
+
+# Production-specific Secret generators (placeholders)
+secretGenerator:
+  - name: prod-secrets
+    literals:
+      - ADDITIONAL_SECRET="PLACEHOLDER"
+    options:
+      disableNameSuffixHash: true
+
+# Production variables
+vars:
+  - name: DOMAIN
+    objref:
+      kind: ConfigMap
+      name: prod-config
+      apiVersion: v1
+    fieldref:
+      fieldpath: data.DOMAIN
+  - name: ENVIRONMENT
+    objref:
+      kind: ConfigMap
+      name: prod-config
+      apiVersion: v1
+    fieldref:
+      fieldpath: data.ENVIRONMENT
+
+# Generator options
+generatorOptions:
+  disableNameSuffixHash: false
+  labels:
+    environment: prod
+    criticality: high
+  annotations:
+    environment: production
+    backup-required: "true"
+    monitoring-level: "enhanced"

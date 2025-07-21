@@ -1,0 +1,70 @@
+# Development environment ingress configuration
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ecommerce-ingress
+  namespace: ecommerce-platform
+  annotations:
+    # Development-specific annotations
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    
+    # Relaxed rate limiting for development
+    nginx.ingress.kubernetes.io/rate-limit-connections: "50"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    nginx.ingress.kubernetes.io/rate-limit: "1000"
+    
+    # CORS settings for development
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization"
+    nginx.ingress.kubernetes.io/cors-allow-credentials: "true"
+    
+    # Use Let's Encrypt staging for development
+    cert-manager.io/cluster-issuer: "letsencrypt-staging"
+    
+    # Development-specific configuration
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header X-Environment "development" always;
+      add_header X-Debug-Mode "true" always;
+      add_header Access-Control-Allow-Origin "*" always;
+spec:
+  tls:
+  - hosts:
+    - dev-ecommerce.example.com
+    - dev-api-ecommerce.example.com
+    secretName: ecommerce-tls-secret-dev
+  rules:
+  # Frontend application (development)
+  - host: dev-ecommerce.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend-service
+            port:
+              number: 80
+  # API routes (development)
+  - host: dev-api-ecommerce.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: api-gateway-service
+            port:
+              number: 8080
+      # Health check endpoint
+      - path: /health
+        pathType: Exact
+        backend:
+          service:
+            name: api-gateway-service
+            port:
+              number: 8080

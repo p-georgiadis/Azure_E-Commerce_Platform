@@ -1,0 +1,22 @@
+# Flask and web server dependencies
+Flask==3.0.0
+gunicorn==21.2.0
+flask-cors==4.0.0
+
+# Azure dependencies
+azure-servicebus==7.11.4
+azure-identity==1.15.0
+azure-keyvault-secrets==4.7.0
+
+# Security and validation
+PyJWT==2.8.0
+marshmallow==3.20.1
+cryptography==41.0.7
+
+# Utilities
+requests==2.31.0
+python-dateutil==2.8.2
+
+# Development dependencies (optional)
+pytest==7.4.3
+pytest-cov==4.1.0

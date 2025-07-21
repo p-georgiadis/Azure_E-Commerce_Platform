@@ -1,0 +1,72 @@
+# Kustomize configuration for field transformations
+nameReference:
+- kind: Service
+  version: v1
+  fieldSpecs:
+  - path: spec/rules/http/paths/backend/service/name
+    kind: Ingress
+  - path: spec/backend/service/name
+    kind: Ingress
+  - path: metadata/annotations/nginx.ingress.kubernetes.io~1upstream-vhost
+    kind: Ingress
+
+- kind: Secret
+  version: v1
+  fieldSpecs:
+  - path: spec/tls/secretName
+    kind: Ingress
+  - path: spec/secretObjects/secretName
+    kind: SecretProviderClass
+  - path: spec/volumes/csi/volumeAttributes/secretProviderClass
+    kind: Pod
+    create: false
+
+- kind: ConfigMap
+  version: v1
+  fieldSpecs:
+  - path: spec/volumes/configMap/name
+    kind: Pod
+    create: false
+  - path: spec/containers/envFrom/configMapRef/name
+    kind: Pod
+    create: false
+
+- kind: ServiceAccount
+  version: v1
+  fieldSpecs:
+  - path: spec/serviceAccountName
+    kind: Pod
+    create: false
+  - path: spec/template/spec/serviceAccountName
+    kind: Deployment
+    create: false
+
+namespace:
+- path: metadata/namespace
+  create: true
+  kind: ClusterRoleBinding
+- path: subjects/namespace
+  create: true
+  kind: ClusterRoleBinding
+- path: metadata/namespace
+  create: true
+  kind: RoleBinding
+- path: subjects/namespace
+  create: true
+  kind: RoleBinding
+
+varReference:
+- path: metadata/annotations
+  kind: Ingress
+- path: spec/rules/host
+  kind: Ingress
+- path: spec/tls/hosts
+  kind: Ingress
+- path: spec/acme/email
+  kind: ClusterIssuer
+
+images:
+- path: spec/template/spec/containers/image
+  kind: Deployment
+- path: spec/template/spec/initContainers/image
+  kind: Deployment

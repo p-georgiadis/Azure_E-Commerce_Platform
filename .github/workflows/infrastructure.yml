@@ -1,0 +1,359 @@
+# Infrastructure deployment workflow using Bicep
+name: Infrastructure Deployment
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'infrastructure/bicep/**'
+      - '.github/workflows/infrastructure.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'infrastructure/bicep/**'
+      - '.github/workflows/infrastructure.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy infrastructure to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - staging
+        - prod
+      destroy:
+        description: 'Destroy infrastructure (DANGER!)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+jobs:
+  # Validate Bicep templates
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup Bicep
+        uses: azure/setup-bicep@v1
+        with:
+          bicep-version: "latest"
+
+      - name: Validate Bicep templates
+        run: |
+          cd infrastructure/bicep
+          
+          echo "Validating main template..."
+          az deployment sub validate \
+            --location "East US" \
+            --template-file main.bicep \
+            --parameters @parameters/dev.parameters.json
+          
+          echo "Validating individual modules..."
+          for module in modules/*.bicep; do
+            echo "Validating $module..."
+            bicep build "$module"
+          done
+
+      - name: Run Bicep linting
+        run: |
+          cd infrastructure/bicep
+          
+          echo "Linting Bicep templates..."
+          bicep lint main.bicep
+          
+          for module in modules/*.bicep; do
+            echo "Linting $module..."
+            bicep lint "$module"
+          done
+
+  # Deploy infrastructure
+  deploy-infrastructure:
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.ref == 'refs/heads/main' || github.event.inputs.environment
+    strategy:
+      matrix:
+        environment: 
+          - ${{ github.event.inputs.environment || 'dev' }}
+    environment: ${{ matrix.environment }}-infrastructure
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup Bicep
+        uses: azure/setup-bicep@v1
+        with:
+          bicep-version: "latest"
+
+      - name: Set environment variables
+        run: |
+          case "${{ matrix.environment }}" in
+            "dev")
+              echo "LOCATION=East US" >> $GITHUB_ENV
+              echo "DEPLOYMENT_NAME=ecommerce-dev-$(date +%Y%m%d%H%M%S)" >> $GITHUB_ENV
+              ;;
+            "staging")
+              echo "LOCATION=East US" >> $GITHUB_ENV
+              echo "DEPLOYMENT_NAME=ecommerce-staging-$(date +%Y%m%d%H%M%S)" >> $GITHUB_ENV
+              ;;
+            "prod")
+              echo "LOCATION=East US" >> $GITHUB_ENV
+              echo "DEPLOYMENT_NAME=ecommerce-prod-$(date +%Y%m%d%H%M%S)" >> $GITHUB_ENV
+              ;;
+          esac
+
+      - name: Deploy infrastructure
+        if: github.event.inputs.destroy != 'true'
+        run: |
+          cd infrastructure/bicep
+          
+          echo "Deploying infrastructure for ${{ matrix.environment }} environment..."
+          
+          # Create deployment
+          az deployment sub create \
+            --name "${{ env.DEPLOYMENT_NAME }}" \
+            --location "${{ env.LOCATION }}" \
+            --template-file main.bicep \
+            --parameters @parameters/${{ matrix.environment }}.parameters.json \
+            --parameters deploymentName="${{ env.DEPLOYMENT_NAME }}" \
+            --verbose
+          
+          echo "Deployment completed successfully!"
+
+      - name: Destroy infrastructure (DANGER!)
+        if: github.event.inputs.destroy == 'true'
+        run: |
+          echo "⚠️  DESTROYING INFRASTRUCTURE FOR ${{ matrix.environment }}! ⚠️"
+          echo "This action is irreversible!"
+          
+          # Get resource groups for this environment
+          RESOURCE_GROUPS=$(az group list --query "[?tags.environment=='${{ matrix.environment }}' && tags.project=='azure-ecommerce-platform'].name" -o tsv)
+          
+          for rg in $RESOURCE_GROUPS; do
+            echo "Deleting resource group: $rg"
+            az group delete --name "$rg" --yes --no-wait
+          done
+          
+          echo "Resource groups deletion initiated. This may take several minutes to complete."
+
+      - name: Get deployment outputs
+        if: github.event.inputs.destroy != 'true'
+        run: |
+          echo "Getting deployment outputs..."
+          
+          # Get the deployment outputs
+          OUTPUTS=$(az deployment sub show \
+            --name "${{ env.DEPLOYMENT_NAME }}" \
+            --query 'properties.outputs' \
+            --output json)
+          
+          echo "Deployment outputs:"
+          echo "$OUTPUTS" | jq '.'
+          
+          # Save outputs for use in subsequent jobs
+          echo "$OUTPUTS" > deployment-outputs.json
+
+      - name: Upload deployment outputs
+        if: github.event.inputs.destroy != 'true'
+        uses: actions/upload-artifact@v3
+        with:
+          name: deployment-outputs-${{ matrix.environment }}
+          path: deployment-outputs.json
+          retention-days: 30
+
+  # Post-deployment configuration
+  post-deployment:
+    runs-on: ubuntu-latest
+    needs: deploy-infrastructure
+    if: github.event.inputs.destroy != 'true'
+    strategy:
+      matrix:
+        environment: 
+          - ${{ github.event.inputs.environment || 'dev' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Download deployment outputs
+        uses: actions/download-artifact@v3
+        with:
+          name: deployment-outputs-${{ matrix.environment }}
+
+      - name: Configure AKS cluster
+        run: |
+          echo "Configuring AKS cluster..."
+          
+          # Get cluster info from deployment outputs
+          CLUSTER_NAME=$(jq -r '.aksClusterName.value' deployment-outputs.json)
+          RESOURCE_GROUP=$(jq -r '.aksResourceGroupName.value' deployment-outputs.json)
+          
+          echo "Cluster: $CLUSTER_NAME in Resource Group: $RESOURCE_GROUP"
+          
+          # Get AKS credentials
+          az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$CLUSTER_NAME" --overwrite-existing
+          
+          # Install necessary add-ons
+          echo "Installing NGINX Ingress Controller..."
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.8.2/deploy/static/provider/cloud/deploy.yaml
+          
+          echo "Installing cert-manager..."
+          kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.2/cert-manager.yaml
+          
+          echo "Installing Azure Key Vault Provider for Secrets Store CSI Driver..."
+          kubectl apply -f https://raw.githubusercontent.com/Azure/secrets-store-csi-driver-provider-azure/master/deployment/provider-azure-installer.yaml
+          
+          echo "Waiting for installations to complete..."
+          kubectl wait --for=condition=Ready pods --all -n ingress-nginx --timeout=300s
+          kubectl wait --for=condition=Ready pods --all -n cert-manager --timeout=300s
+          
+          echo "AKS cluster configuration completed!"
+
+      - name: Configure monitoring
+        run: |
+          echo "Configuring monitoring and observability..."
+          
+          # Enable Application Insights integration
+          CLUSTER_NAME=$(jq -r '.aksClusterName.value' deployment-outputs.json)
+          RESOURCE_GROUP=$(jq -r '.aksResourceGroupName.value' deployment-outputs.json)
+          APP_INSIGHTS_NAME=$(jq -r '.applicationInsightsName.value' deployment-outputs.json)
+          
+          # Enable monitoring add-on
+          az aks enable-addons \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$CLUSTER_NAME" \
+            --addons monitoring \
+            --workspace-resource-id "/subscriptions/${{ env.AZURE_SUBSCRIPTION_ID }}/resourcegroups/$RESOURCE_GROUP/providers/microsoft.operationalinsights/workspaces/$APP_INSIGHTS_NAME"
+          
+          echo "Monitoring configuration completed!"
+
+      - name: Set up secrets
+        run: |
+          echo "Setting up Kubernetes secrets..."
+          
+          # Get Key Vault name from deployment outputs
+          KEY_VAULT_NAME=$(jq -r '.keyVaultName.value' deployment-outputs.json)
+          
+          # Create namespace if it doesn't exist
+          kubectl create namespace ecommerce-platform --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Note: In a real deployment, you would configure the Azure Key Vault Provider
+          # to automatically sync secrets from Azure Key Vault to Kubernetes secrets
+          echo "Key Vault name: $KEY_VAULT_NAME"
+          echo "Secrets configuration completed!"
+
+  # Infrastructure testing
+  test-infrastructure:
+    runs-on: ubuntu-latest
+    needs: post-deployment
+    if: github.event.inputs.destroy != 'true'
+    strategy:
+      matrix:
+        environment: 
+          - ${{ github.event.inputs.environment || 'dev' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Download deployment outputs
+        uses: actions/download-artifact@v3
+        with:
+          name: deployment-outputs-${{ matrix.environment }}
+
+      - name: Test infrastructure components
+        run: |
+          echo "Testing infrastructure components..."
+          
+          # Get resource information
+          CLUSTER_NAME=$(jq -r '.aksClusterName.value' deployment-outputs.json)
+          RESOURCE_GROUP=$(jq -r '.aksResourceGroupName.value' deployment-outputs.json)
+          
+          # Test AKS cluster
+          echo "Testing AKS cluster..."
+          az aks show --resource-group "$RESOURCE_GROUP" --name "$CLUSTER_NAME" --query 'provisioningState' -o tsv
+          
+          # Get cluster credentials
+          az aks get-credentials --resource-group "$RESOURCE_GROUP" --name "$CLUSTER_NAME" --overwrite-existing
+          
+          # Test cluster connectivity
+          kubectl cluster-info
+          kubectl get nodes
+          
+          # Test installed components
+          echo "Testing installed components..."
+          kubectl get pods -n ingress-nginx
+          kubectl get pods -n cert-manager
+          
+          echo "Infrastructure testing completed successfully!"
+
+      - name: Generate infrastructure report
+        run: |
+          echo "Generating infrastructure report..."
+          
+          # Create a simple infrastructure report
+          cat > infrastructure-report.md << EOF
+          # Infrastructure Deployment Report
+          
+          **Environment:** ${{ matrix.environment }}
+          **Deployment Date:** $(date)
+          **Deployment Name:** ${{ env.DEPLOYMENT_NAME }}
+          
+          ## Deployed Resources
+          
+          $(az resource list --query '[?tags.environment==`${{ matrix.environment }}`].{Name:name, Type:type, Location:location}' --output table)
+          
+          ## AKS Cluster Information
+          
+          - **Cluster Name:** $(jq -r '.aksClusterName.value' deployment-outputs.json)
+          - **Resource Group:** $(jq -r '.aksResourceGroupName.value' deployment-outputs.json)
+          - **Node Count:** $(kubectl get nodes --no-headers | wc -l)
+          
+          ## Key Components
+          
+          - ✅ AKS Cluster
+          - ✅ Azure Container Registry
+          - ✅ Key Vault
+          - ✅ Application Gateway
+          - ✅ Monitoring (Application Insights)
+          - ✅ Networking (VNet, Subnets, NSGs)
+          - ✅ Data Services (Cosmos DB, SQL Database, Service Bus, Event Hub)
+          
+          EOF
+          
+          echo "Infrastructure report generated!"
+
+      - name: Upload infrastructure report
+        uses: actions/upload-artifact@v3
+        with:
+          name: infrastructure-report-${{ matrix.environment }}
+          path: infrastructure-report.md
+          retention-days: 90

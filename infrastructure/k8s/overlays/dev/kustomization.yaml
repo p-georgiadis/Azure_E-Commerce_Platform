@@ -1,0 +1,142 @@
+# Kustomization for Development environment
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  name: ecommerce-platform-dev
+  annotations:
+    description: "Development environment configuration for E-Commerce Platform"
+
+# Base resources to include
+bases:
+  - ../../base
+
+# Environment-specific labels
+commonLabels:
+  environment: dev
+  tier: development
+
+# Environment-specific annotations
+commonAnnotations:
+  environment: development
+  cost-center: "development"
+  team: "platform-engineering"
+
+# Namespace suffix for development
+namePrefix: ""
+nameSuffix: "-dev"
+
+# Development-specific images with tags
+images:
+  - name: PLACEHOLDER_ACR_NAME.azurecr.io/product-service
+    newTag: dev-latest
+  - name: PLACEHOLDER_ACR_NAME.azurecr.io/order-service
+    newTag: dev-latest
+  - name: PLACEHOLDER_ACR_NAME.azurecr.io/payment-service
+    newTag: dev-latest
+  - name: PLACEHOLDER_ACR_NAME.azurecr.io/notification-service
+    newTag: dev-latest
+  - name: PLACEHOLDER_ACR_NAME.azurecr.io/frontend-service
+    newTag: dev-latest
+
+# Development resource scaling
+replicas:
+  - name: product-service
+    count: 1
+  - name: order-service
+    count: 1
+  - name: payment-service
+    count: 1
+  - name: notification-service
+    count: 1
+  - name: frontend-service
+    count: 1
+  - name: api-gateway
+    count: 1
+
+# Development-specific patches
+patchesStrategicMerge:
+  - dev-resources.yaml
+  - dev-ingress.yaml
+  - dev-hpa.yaml
+
+# JSON patches for fine-grained modifications
+patches:
+  # Reduce resource requests for development
+  - target:
+      kind: Deployment
+      name: ".*"
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "128Mi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "100m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "256Mi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "200m"
+  
+  # Enable debug logging
+  - target:
+      kind: ConfigMap
+      name: ecommerce-config
+    patch: |
+      - op: replace
+        path: /data/LOG_LEVEL
+        value: "debug"
+      - op: replace
+        path: /data/NODE_ENV
+        value: "development"
+  
+  # Disable SSL redirect for development
+  - target:
+      kind: Ingress
+      name: ecommerce-ingress
+    patch: |
+      - op: replace
+        path: /metadata/annotations/nginx.ingress.kubernetes.io~1ssl-redirect
+        value: "false"
+      - op: replace
+        path: /metadata/annotations/nginx.ingress.kubernetes.io~1force-ssl-redirect
+        value: "false"
+
+# Development-specific ConfigMap generators
+configMapGenerator:
+  - name: dev-config
+    literals:
+      - DEBUG_MODE="true"
+      - METRICS_ENABLED="true"
+      - TRACING_ENABLED="true"
+      - CORS_ORIGINS="http://localhost:3000,https://dev-ecommerce.example.com"
+      - RATE_LIMIT_ENABLED="false"
+    options:
+      disableNameSuffixHash: true
+
+# Development-specific variables
+vars:
+  - name: DOMAIN
+    objref:
+      kind: ConfigMap
+      name: dev-config
+      apiVersion: v1
+    fieldref:
+      fieldpath: data.DOMAIN
+  - name: ENVIRONMENT
+    objref:
+      kind: ConfigMap
+      name: dev-config
+      apiVersion: v1
+    fieldref:
+      fieldpath: data.ENVIRONMENT
+
+# Generator options
+generatorOptions:
+  disableNameSuffixHash: false
+  labels:
+    environment: dev
+  annotations:
+    environment: development
