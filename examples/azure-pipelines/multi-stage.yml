@@ -1,0 +1,622 @@
+# Multi-stage Azure DevOps Pipeline with Power Platform Integration
+# Demonstrates CI/CD best practices with security scanning and approvals
+
+trigger:
+  branches:
+    include:
+    - main
+    - develop
+    - feature/*
+  paths:
+    exclude:
+    - README.md
+    - docs/*
+
+pr:
+  branches:
+    include:
+    - main
+    - develop
+  paths:
+    exclude:
+    - README.md
+    - docs/*
+
+variables:
+  # Container Registry
+  dockerRegistry: 'acrecommerce.azurecr.io'
+  dockerRegistryServiceConnection: 'ACR-ServiceConnection'
+  
+  # Kubernetes
+  kubernetesServiceConnection: 'AKS-ServiceConnection'
+  
+  # Power Platform
+  powerPlatformServiceConnection: 'PowerPlatform-ServiceConnection'
+  solutionName: 'ECommercePlatform'
+  
+  # Build Configuration
+  buildConfiguration: 'Release'
+  DOCKER_BUILDKIT: 1
+  
+  # Versioning
+  majorVersion: 1
+  minorVersion: 0
+  patchVersion: $[counter(variables['majorVersion.minorVersion'], 0)]
+  version: $(majorVersion).$(minorVersion).$(patchVersion)
+
+stages:
+# Build Stage
+- stage: Build
+  displayName: 'Build and Test'
+  jobs:
+  - job: BuildMicroservices
+    displayName: 'Build Microservices'
+    pool:
+      vmImage: 'ubuntu-latest'
+    strategy:
+      matrix:
+        frontend:
+          serviceName: 'frontend'
+          serviceDirectory: 'services/frontend'
+          dockerFile: 'services/frontend/Dockerfile'
+        productService:
+          serviceName: 'product-service'
+          serviceDirectory: 'services/product-service'
+          dockerFile: 'services/product-service/Dockerfile'
+        orderService:
+          serviceName: 'order-service'
+          serviceDirectory: 'services/order-service'
+          dockerFile: 'services/order-service/Dockerfile'
+        paymentService:
+          serviceName: 'payment-service'
+          serviceDirectory: 'services/payment-service'
+          dockerFile: 'services/payment-service/Dockerfile'
+        notificationService:
+          serviceName: 'notification-service'
+          serviceDirectory: 'services/notification-service'
+          dockerFile: 'services/notification-service/Dockerfile'
+    steps:
+    # Checkout code
+    - checkout: self
+      clean: true
+      fetchDepth: 0
+
+    # Cache Docker layers
+    - task: Cache@2
+      inputs:
+        key: 'docker | "$(Agent.OS)" | $(serviceName) | $(serviceDirectory)/Dockerfile'
+        restoreKeys: |
+          docker | "$(Agent.OS)" | $(serviceName)
+          docker | "$(Agent.OS)"
+        path: $(Pipeline.Workspace)/.docker
+      displayName: 'Cache Docker layers'
+
+    # Build Docker image
+    - task: Docker@2
+      displayName: 'Build $(serviceName) image'
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(serviceName)'
+        command: 'build'
+        Dockerfile: '$(dockerFile)'
+        buildContext: '$(serviceDirectory)'
+        tags: |
+          $(version)
+          $(Build.BuildId)
+          latest
+        arguments: |
+          --cache-from=$(dockerRegistry)/$(serviceName):latest
+          --build-arg BUILDKIT_INLINE_CACHE=1
+
+    # Run tests
+    - script: |
+        docker run --rm \
+          -e CI=true \
+          $(dockerRegistry)/$(serviceName):$(Build.BuildId) \
+          pytest tests/ --junitxml=test-results.xml --cov=app --cov-report=xml
+      displayName: 'Run unit tests'
+      condition: ne(variables['serviceName'], 'frontend')
+
+    # Publish test results
+    - task: PublishTestResults@2
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '**/test-results.xml'
+        failTaskOnFailedTests: true
+      condition: ne(variables['serviceName'], 'frontend')
+
+    # Publish code coverage
+    - task: PublishCodeCoverageResults@1
+      inputs:
+        codeCoverageTool: 'Cobertura'
+        summaryFileLocation: '**/coverage.xml'
+      condition: ne(variables['serviceName'], 'frontend')
+
+    # Scan for vulnerabilities
+    - task: trivy@1
+      displayName: 'Security scan $(serviceName)'
+      inputs:
+        image: '$(dockerRegistry)/$(serviceName):$(Build.BuildId)'
+        exitCode: 1
+
+    # Push to registry
+    - task: Docker@2
+      displayName: 'Push $(serviceName) image'
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(serviceName)'
+        command: 'push'
+        tags: |
+          $(version)
+          $(Build.BuildId)
+          latest
+
+  # Build Infrastructure
+  - job: BuildInfrastructure
+    displayName: 'Validate Infrastructure'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - checkout: self
+
+    # Install Bicep
+    - task: AzureCLI@2
+      displayName: 'Install Bicep CLI'
+      inputs:
+        azureSubscription: 'Azure-ServiceConnection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az bicep install
+          az bicep version
+
+    # Validate Bicep templates
+    - task: AzureCLI@2
+      displayName: 'Validate Bicep templates'
+      inputs:
+        azureSubscription: 'Azure-ServiceConnection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          # Validate main template
+          az deployment sub validate \
+            --location eastus \
+            --template-file infrastructure/bicep/main.bicep \
+            --parameters @infrastructure/bicep/parameters/dev.parameters.json
+
+    # Lint Bicep files
+    - script: |
+        find infrastructure/bicep -name "*.bicep" -exec az bicep build {} \;
+      displayName: 'Lint Bicep files'
+
+    # Create Template Spec
+    - task: AzureCLI@2
+      displayName: 'Create Template Spec'
+      inputs:
+        azureSubscription: 'Azure-ServiceConnection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          az ts create \
+            --name "ecommerce-platform" \
+            --version "$(version)" \
+            --resource-group "rg-templatespecs" \
+            --location "eastus" \
+            --template-file "infrastructure/bicep/main.bicep" \
+            --yes
+
+  # Build Power Platform Solutions
+  - job: BuildPowerPlatform
+    displayName: 'Build Power Platform Solutions'
+    pool:
+      vmImage: 'windows-latest'
+    steps:
+    - checkout: self
+
+    # Install Power Platform Tools
+    - task: PowerPlatformToolInstaller@2
+      displayName: 'Install Power Platform Tools'
+
+    # Pack solution
+    - task: PowerPlatformPackSolution@2
+      displayName: 'Pack Power Platform solution'
+      inputs:
+        SolutionSourceFolder: 'power-platform/solutions/$(solutionName)'
+        SolutionOutputFile: '$(Build.ArtifactStagingDirectory)/$(solutionName)_$(version).zip'
+        SolutionType: 'Both'
+
+    # Publish solution artifact
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Power Platform solution'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'PowerPlatformSolutions'
+
+# Security Scanning Stage
+- stage: SecurityScan
+  displayName: 'Security Scanning'
+  dependsOn: Build
+  jobs:
+  - job: SecurityAnalysis
+    displayName: 'Security Analysis'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    # Run OWASP dependency check
+    - task: dependency-check-build-task@6
+      displayName: 'OWASP Dependency Check'
+      inputs:
+        projectName: 'E-Commerce Platform'
+        scanPath: '$(Build.SourcesDirectory)'
+        format: 'ALL'
+
+    # Run SonarQube analysis
+    - task: SonarQubePrepare@5
+      displayName: 'Prepare SonarQube analysis'
+      inputs:
+        SonarQube: 'SonarQube-ServiceConnection'
+        scannerMode: 'CLI'
+        configMode: 'file'
+
+    - task: SonarQubeAnalyze@5
+      displayName: 'Run SonarQube analysis'
+
+    - task: SonarQubePublish@5
+      displayName: 'Publish SonarQube results'
+
+# Deploy to Development
+- stage: DeployDev
+  displayName: 'Deploy to Development'
+  dependsOn: SecurityScan
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+  jobs:
+  - deployment: DeployInfrastructure
+    displayName: 'Deploy Infrastructure'
+    environment: 'Development'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureCLI@2
+            displayName: 'Deploy infrastructure'
+            inputs:
+              azureSubscription: 'Azure-ServiceConnection'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                # Deploy using Deployment Stack
+                az stack sub create \
+                  --name "stack-ecommerce-dev" \
+                  --location "eastus" \
+                  --template-spec "/subscriptions/$(subscriptionId)/resourceGroups/rg-templatespecs/providers/Microsoft.Resources/templateSpecs/ecommerce-platform/versions/$(version)" \
+                  --parameters @infrastructure/bicep/parameters/dev.parameters.json \
+                  --deny-settings-mode "none" \
+                  --yes
+
+  - deployment: DeployServices
+    displayName: 'Deploy Microservices'
+    dependsOn: DeployInfrastructure
+    environment: 'Development'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          # Get AKS credentials
+          - task: AzureCLI@2
+            displayName: 'Get AKS credentials'
+            inputs:
+              azureSubscription: 'Azure-ServiceConnection'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az aks get-credentials \
+                  --resource-group "rg-ecommerce-dev" \
+                  --name "aks-ecommerce-dev" \
+                  --overwrite-existing
+
+          # Deploy Kubernetes manifests
+          - task: KubernetesManifest@0
+            displayName: 'Deploy to AKS'
+            inputs:
+              action: 'deploy'
+              kubernetesServiceConnection: '$(kubernetesServiceConnection)'
+              namespace: 'ecommerce-dev'
+              manifests: |
+                kubernetes/namespaces/*.yaml
+                kubernetes/configmaps/*.yaml
+                kubernetes/secrets/*.yaml
+                kubernetes/deployments/*.yaml
+                kubernetes/services/*.yaml
+                kubernetes/ingress/*.yaml
+              containers: |
+                $(dockerRegistry)/frontend:$(Build.BuildId)
+                $(dockerRegistry)/product-service:$(Build.BuildId)
+                $(dockerRegistry)/order-service:$(Build.BuildId)
+                $(dockerRegistry)/payment-service:$(Build.BuildId)
+                $(dockerRegistry)/notification-service:$(Build.BuildId)
+
+          # Deploy monitoring
+          - task: HelmDeploy@0
+            displayName: 'Deploy Prometheus and Grafana'
+            inputs:
+              connectionType: 'Kubernetes Service Connection'
+              kubernetesServiceConnection: '$(kubernetesServiceConnection)'
+              namespace: 'monitoring'
+              command: 'upgrade'
+              chartType: 'Name'
+              chartName: 'prometheus-community/kube-prometheus-stack'
+              releaseName: 'prometheus'
+              overrideValues: |
+                prometheus.prometheusSpec.retention=30d
+                grafana.adminPassword=$(grafanaPassword)
+                grafana.persistence.enabled=true
+                grafana.persistence.size=10Gi
+
+  - deployment: DeployPowerPlatform
+    displayName: 'Deploy Power Platform'
+    dependsOn: DeployServices
+    environment: 'Development'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          # Download artifacts
+          - task: DownloadBuildArtifacts@0
+            inputs:
+              buildType: 'current'
+              downloadType: 'single'
+              artifactName: 'PowerPlatformSolutions'
+              downloadPath: '$(System.ArtifactsDirectory)'
+
+          # Import to Dev environment
+          - task: PowerPlatformImportSolution@2
+            displayName: 'Import solution to Dev'
+            inputs:
+              authenticationType: 'PowerPlatformSPN'
+              PowerPlatformSPN: '$(powerPlatformServiceConnection)'
+              SolutionInputFile: '$(System.ArtifactsDirectory)/PowerPlatformSolutions/$(solutionName)_$(version).zip'
+              AsyncOperation: true
+              MaxAsyncWaitTime: 60
+
+          # Run solution checker
+          - task: PowerPlatformChecker@2
+            displayName: 'Run solution checker'
+            inputs:
+              authenticationType: 'PowerPlatformSPN'
+              PowerPlatformSPN: '$(powerPlatformServiceConnection)'
+              FilesToAnalyze: '$(System.ArtifactsDirectory)/PowerPlatformSolutions/$(solutionName)_$(version).zip'
+              RuleSet: 'Solution Checker'
+
+# Deploy to Staging
+- stage: DeployStaging
+  displayName: 'Deploy to Staging'
+  dependsOn: DeployDev
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - job: WaitForApproval
+    displayName: 'Wait for Approval'
+    pool: server
+    steps:
+    - task: ManualValidation@0
+      displayName: 'Manual approval for Staging'
+      inputs:
+        notifyUsers: 'devops-approvers@company.com'
+        instructions: 'Please review the deployment and approve for Staging'
+        onTimeout: 'reject'
+
+  - deployment: DeployToStaging
+    displayName: 'Deploy to Staging'
+    dependsOn: WaitForApproval
+    environment: 'Staging'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          # Similar deployment steps as Dev but with staging parameters
+          - template: templates/deploy-environment.yml
+            parameters:
+              environment: 'staging'
+              azureServiceConnection: 'Azure-ServiceConnection'
+              kubernetesServiceConnection: 'AKS-Staging-ServiceConnection'
+              powerPlatformServiceConnection: 'PowerPlatform-Staging-ServiceConnection'
+
+# Deploy to Production
+- stage: DeployProduction
+  displayName: 'Deploy to Production'
+  dependsOn: DeployStaging
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - job: ProductionGate
+    displayName: 'Production Gate Checks'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    # Check staging health
+    - task: AzureCLI@2
+      displayName: 'Verify staging health'
+      inputs:
+        azureSubscription: 'Azure-ServiceConnection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          # Run health checks on staging
+          python scripts/automation/health-check.py --environment staging
+          
+    # Check for active incidents
+    - task: InvokeRESTAPI@1
+      displayName: 'Check ServiceNow incidents'
+      inputs:
+        connectionType: 'connectedServiceName'
+        serviceConnection: 'ServiceNow-Connection'
+        method: 'GET'
+        urlSuffix: '/api/now/table/incident?sysparm_query=active=true^priority=1'
+        successCriteria: 'eq(root.result.length, 0)'
+
+  - deployment: DeployToProduction
+    displayName: 'Deploy to Production'
+    dependsOn: ProductionGate
+    environment: 'Production'
+    strategy:
+      canary:
+        increments: [10, 25, 50, 100]
+        preDeploy:
+          steps:
+          - task: AzureCLI@2
+            displayName: 'Create deployment backup'
+            inputs:
+              azureSubscription: 'Azure-ServiceConnection'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                # Backup current production state
+                kubectl get all -n ecommerce-prod -o yaml > $(Build.ArtifactStagingDirectory)/prod-backup-$(Build.BuildId).yaml
+                
+                # Upload to storage
+                az storage blob upload \
+                  --account-name backupstore \
+                  --container-name deployments \
+                  --name prod-backup-$(Build.BuildId).yaml \
+                  --file $(Build.ArtifactStagingDirectory)/prod-backup-$(Build.BuildId).yaml
+
+        deploy:
+          steps:
+          # Deploy with canary strategy
+          - task: KubernetesManifest@0
+            displayName: 'Deploy canary to AKS'
+            inputs:
+              action: 'deploy'
+              kubernetesServiceConnection: 'AKS-Prod-ServiceConnection'
+              namespace: 'ecommerce-prod'
+              strategy: 'canary'
+              percentage: '$(strategy.increment)'
+              manifests: |
+                kubernetes/deployments/*.yaml
+                kubernetes/services/*.yaml
+
+          # Monitor canary health
+          - script: |
+              python scripts/automation/canary-monitor.py \
+                --namespace ecommerce-prod \
+                --canary-percentage $(strategy.increment) \
+                --duration 300 \
+                --slo-threshold 99.9
+            displayName: 'Monitor canary deployment'
+
+        routeTraffic:
+          steps:
+          - task: KubernetesManifest@0
+            displayName: 'Route traffic to canary'
+            inputs:
+              action: 'promote'
+              kubernetesServiceConnection: 'AKS-Prod-ServiceConnection'
+              namespace: 'ecommerce-prod'
+              strategy: 'canary'
+              percentage: '$(strategy.increment)'
+
+        postRouteTraffic:
+          steps:
+          # Update Power BI dashboard
+          - task: PowerShell@2
+            displayName: 'Update deployment metrics'
+            inputs:
+              targetType: 'inline'
+              script: |
+                $metrics = @{
+                  timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                  pipelineName = "$(Build.DefinitionName)"
+                  environment = "Production"
+                  deploymentStatus = "InProgress"
+                  duration = $(System.JobPositionInPhase)
+                  canaryPercentage = $(strategy.increment)
+                  commitId = "$(Build.SourceVersion)"
+                  deployedBy = "$(Build.RequestedFor)"
+                }
+                
+                # Send to Power BI streaming dataset
+                Invoke-RestMethod -Method Post -Uri $env:POWERBI_STREAMING_URL -Body ($metrics | ConvertTo-Json) -ContentType "application/json"
+
+        on:
+          failure:
+            steps:
+            # Rollback on failure
+            - task: KubernetesManifest@0
+              displayName: 'Rollback deployment'
+              inputs:
+                action: 'reject'
+                kubernetesServiceConnection: 'AKS-Prod-ServiceConnection'
+                namespace: 'ecommerce-prod'
+                strategy: 'canary'
+
+            # Trigger incident
+            - task: ServiceNow-CreateIncident@1
+              displayName: 'Create incident'
+              inputs:
+                serviceNowConnection: 'ServiceNow-Connection'
+                short_description: 'Production deployment failed - $(Build.BuildNumber)'
+                priority: '1'
+                assignment_group: 'DevOps Team'
+
+          success:
+            steps:
+            # Final health check
+            - script: |
+                python scripts/automation/health-check.py --environment production
+              displayName: 'Final health verification'
+
+            # Update deployment record
+            - task: AzureCLI@2
+              displayName: 'Update deployment record'
+              inputs:
+                azureSubscription: 'Azure-ServiceConnection'
+                scriptType: 'bash'
+                scriptLocation: 'inlineScript'
+                inlineScript: |
+                  # Tag resources with deployment info
+                  az tag create --resource-id /subscriptions/$(subscriptionId)/resourceGroups/rg-ecommerce-prod \
+                    --tags LastDeployment=$(Build.BuildId) DeploymentDate=$(Build.BuildDateTime) Version=$(version)
+
+# Post-Deployment Stage
+- stage: PostDeployment
+  displayName: 'Post-Deployment Tasks'
+  dependsOn: DeployProduction
+  condition: succeeded()
+  jobs:
+  - job: UpdateDocumentation
+    displayName: 'Update Documentation'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    # Generate deployment report
+    - task: PowerShell@2
+      displayName: 'Generate deployment report'
+      inputs:
+        filePath: 'scripts/generate-deployment-report.ps1'
+        arguments: '-BuildId $(Build.BuildId) -Version $(version)'
+
+    # Update wiki
+    - task: WikiUpdater@1
+      displayName: 'Update deployment wiki'
+      inputs:
+        wikiConnection: 'Wiki-Connection'
+        pagePath: '/Deployments/$(version)'
+        content: '$(Build.ArtifactStagingDirectory)/deployment-report.md'
+
+  - job: NotifyStakeholders
+    displayName: 'Notify Stakeholders'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    # Send success notification
+    - task: SendEmail@1
+      displayName: 'Send deployment notification'
+      inputs:
+        to: 'stakeholders@company.com'
+        subject: 'E-Commerce Platform v$(version) Deployed Successfully'
+        body: |
+          The E-Commerce Platform version $(version) has been successfully deployed to production.
+          
+          Build: $(Build.BuildNumber)
+          Deployed by: $(Build.RequestedFor)
+          Deployment time: $(System.JobCompleteTime)
+          
+          View the deployment dashboard: https://app.powerbi.com/dashboards/deployment-metrics

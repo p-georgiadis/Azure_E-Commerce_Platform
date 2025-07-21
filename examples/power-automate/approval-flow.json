@@ -1,0 +1,238 @@
+{
+  "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "azureDevOpsOrganization": {
+      "type": "string",
+      "defaultValue": "your-org"
+    },
+    "azureDevOpsProject": {
+      "type": "string",
+      "defaultValue": "e-commerce-platform"
+    },
+    "approverEmails": {
+      "type": "array",
+      "defaultValue": ["devops-approvers@company.com"]
+    }
+  },
+  "triggers": {
+    "When_a_build_completes": {
+      "type": "ApiConnectionWebhook",
+      "inputs": {
+        "host": {
+          "connection": {
+            "name": "@parameters('$connections')['azuredevops']['connectionId']"
+          }
+        },
+        "body": {
+          "url": "@listCallbackUrl()",
+          "eventType": "build.complete",
+          "filters": {
+            "buildStatus": "succeeded",
+            "branch": "refs/heads/main"
+          }
+        }
+      }
+    }
+  },
+  "actions": {
+    "Get_build_details": {
+      "type": "ApiConnection",
+      "inputs": {
+        "host": {
+          "connection": {
+            "name": "@parameters('$connections')['azuredevops']['connectionId']"
+          }
+        },
+        "method": "get",
+        "path": "/builds/@{triggerBody()?['resource']?['id']}",
+        "queries": {
+          "organization": "@parameters('azureDevOpsOrganization')",
+          "project": "@parameters('azureDevOpsProject')"
+        }
+      }
+    },
+    "Parse_build_information": {
+      "type": "ParseJson",
+      "inputs": {
+        "content": "@body('Get_build_details')",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "integer" },
+            "buildNumber": { "type": "string" },
+            "status": { "type": "string" },
+            "result": { "type": "string" },
+            "sourceBranch": { "type": "string" },
+            "requestedFor": {
+              "type": "object",
+              "properties": {
+                "displayName": { "type": "string" },
+                "uniqueName": { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "runAfter": {
+        "Get_build_details": ["Succeeded"]
+      }
+    },
+    "Send_approval_email": {
+      "type": "ApiConnection",
+      "inputs": {
+        "host": {
+          "connection": {
+            "name": "@parameters('$connections')['office365']['connectionId']"
+          }
+        },
+        "method": "post",
+        "path": "/v2/Mail/OnNewEmail",
+        "body": {
+          "To": "@join(parameters('approverEmails'), ';')",
+          "Subject": "Production Deployment Approval Required - Build @{body('Parse_build_information')?['buildNumber']}",
+          "Body": "<html><body><h2>Production Deployment Approval Request</h2><p><strong>Build Number:</strong> @{body('Parse_build_information')?['buildNumber']}<br/><strong>Requested By:</strong> @{body('Parse_build_information')?['requestedFor']?['displayName']}<br/><strong>Branch:</strong> @{body('Parse_build_information')?['sourceBranch']}</p><p>Please review and approve the deployment to production.</p><a href='@{body('Parse_build_information')?['_links']?['web']?['href']}'>View Build Details</a></body></html>",
+          "Options": "HTML",
+          "Importance": "High"
+        }
+      },
+      "runAfter": {
+        "Parse_build_information": ["Succeeded"]
+      }
+    },
+    "Wait_for_approval": {
+      "type": "ApiConnectionWebhook",
+      "inputs": {
+        "host": {
+          "connection": {
+            "name": "@parameters('$connections')['approvals']['connectionId']"
+          }
+        },
+        "body": {
+          "NotificationUrl": "@listCallbackUrl()",
+          "Message": {
+            "Title": "Production Deployment Approval",
+            "Details": "Build @{body('Parse_build_information')?['buildNumber']} is ready for production deployment. Please approve or reject.",
+            "Options": "Approve, Reject",
+            "Requestor": "@body('Parse_build_information')?['requestedFor']?['uniqueName']"
+          }
+        }
+      },
+      "runAfter": {
+        "Send_approval_email": ["Succeeded"]
+      }
+    },
+    "Condition_check_approval": {
+      "type": "If",
+      "expression": {
+        "and": [
+          {
+            "equals": ["@body('Wait_for_approval')?['SelectedOption']", "Approve"]
+          }
+        ]
+      },
+      "actions": {
+        "Trigger_production_deployment": {
+          "type": "ApiConnection",
+          "inputs": {
+            "host": {
+              "connection": {
+                "name": "@parameters('$connections')['azuredevops']['connectionId']"
+              }
+            },
+            "method": "post",
+            "path": "/pipelines/@{parameters('productionPipelineId')}/runs",
+            "body": {
+              "resources": {
+                "builds": [{
+                  "buildId": "@body('Parse_build_information')?['id']",
+                  "projectId": "@parameters('azureDevOpsProject')"
+                }]
+              },
+              "stagesToSkip": [],
+              "variables": {
+                "approvedBy": {
+                  "value": "@body('Wait_for_approval')?['Responder']"
+                },
+                "approvalTime": {
+                  "value": "@utcNow()"
+                }
+              }
+            }
+          }
+        },
+        "Post_success_to_Teams": {
+          "type": "ApiConnection",
+          "inputs": {
+            "host": {
+              "connection": {
+                "name": "@parameters('$connections')['teams']['connectionId']"
+              }
+            },
+            "method": "post",
+            "path": "/v3/teams/@{parameters('teamsId')}/channels/@{parameters('channelId')}/messages",
+            "body": {
+              "messageBody": {
+                "contentType": "html",
+                "content": "<h3>✅ Production Deployment Approved</h3><p>Build <strong>@{body('Parse_build_information')?['buildNumber']}</strong> has been approved for production deployment by @{body('Wait_for_approval')?['Responder']}.</p>"
+              }
+            }
+          },
+          "runAfter": {
+            "Trigger_production_deployment": ["Succeeded"]
+          }
+        }
+      },
+      "else": {
+        "actions": {
+          "Post_rejection_to_Teams": {
+            "type": "ApiConnection",
+            "inputs": {
+              "host": {
+                "connection": {
+                  "name": "@parameters('$connections')['teams']['connectionId']"
+                }
+              },
+              "method": "post",
+              "path": "/v3/teams/@{parameters('teamsId')}/channels/@{parameters('channelId')}/messages",
+              "body": {
+                "messageBody": {
+                  "contentType": "html",
+                  "content": "<h3>❌ Production Deployment Rejected</h3><p>Build <strong>@{body('Parse_build_information')?['buildNumber']}</strong> has been rejected by @{body('Wait_for_approval')?['Responder']}.</p><p>Reason: @{body('Wait_for_approval')?['Comments']}</p>"
+                }
+              }
+            }
+          },
+          "Log_rejection": {
+            "type": "ApiConnection",
+            "inputs": {
+              "host": {
+                "connection": {
+                  "name": "@parameters('$connections')['azuremonitor']['connectionId']"
+                }
+              },
+              "method": "post",
+              "path": "/customEvents",
+              "body": {
+                "eventName": "DeploymentRejected",
+                "properties": {
+                  "buildNumber": "@body('Parse_build_information')?['buildNumber']",
+                  "rejectedBy": "@body('Wait_for_approval')?['Responder']",
+                  "reason": "@body('Wait_for_approval')?['Comments']",
+                  "timestamp": "@utcNow()"
+                }
+              }
+            },
+            "runAfter": {
+              "Post_rejection_to_Teams": ["Succeeded"]
+            }
+          }
+        }
+      },
+      "runAfter": {
+        "Wait_for_approval": ["Succeeded"]
+      }
+    }
+  },
+  "outputs": {}
+}

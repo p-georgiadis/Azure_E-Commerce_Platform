@@ -1,0 +1,238 @@
+{
+  "name": "E-Commerce Real-Time Analytics",
+  "defaultMode": "Push",
+  "pushStreaming": {
+    "datasets": [
+      {
+        "name": "OrderMetrics",
+        "defaultMode": "PushStreaming",
+        "tables": [
+          {
+            "name": "RealTimeOrders",
+            "columns": [
+              {
+                "name": "timestamp",
+                "dataType": "DateTime",
+                "formatString": "yyyy-MM-dd HH:mm:ss"
+              },
+              {
+                "name": "orderId",
+                "dataType": "String"
+              },
+              {
+                "name": "customerId",
+                "dataType": "String"
+              },
+              {
+                "name": "orderTotal",
+                "dataType": "Double",
+                "formatString": "\\$#,0.00;(\\$#,0.00);\\$#,0.00"
+              },
+              {
+                "name": "productCount",
+                "dataType": "Int64"
+              },
+              {
+                "name": "orderStatus",
+                "dataType": "String"
+              },
+              {
+                "name": "paymentMethod",
+                "dataType": "String"
+              },
+              {
+                "name": "shippingCountry",
+                "dataType": "String"
+              },
+              {
+                "name": "processingTime",
+                "dataType": "Double"
+              }
+            ],
+            "measures": [
+              {
+                "name": "Total Revenue",
+                "expression": "SUM([orderTotal])",
+                "formatString": "\\$#,0.00;(\\$#,0.00);\\$#,0.00"
+              },
+              {
+                "name": "Average Order Value",
+                "expression": "AVERAGE([orderTotal])",
+                "formatString": "\\$#,0.00;(\\$#,0.00);\\$#,0.00"
+              },
+              {
+                "name": "Order Count",
+                "expression": "COUNTROWS(RealTimeOrders)"
+              },
+              {
+                "name": "Average Processing Time",
+                "expression": "AVERAGE([processingTime])",
+                "formatString": "0.00s"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "ServiceHealth",
+        "defaultMode": "PushStreaming",
+        "tables": [
+          {
+            "name": "ServiceMetrics",
+            "columns": [
+              {
+                "name": "timestamp",
+                "dataType": "DateTime"
+              },
+              {
+                "name": "serviceName",
+                "dataType": "String"
+              },
+              {
+                "name": "responseTime",
+                "dataType": "Double"
+              },
+              {
+                "name": "errorRate",
+                "dataType": "Double"
+              },
+              {
+                "name": "requestsPerSecond",
+                "dataType": "Double"
+              },
+              {
+                "name": "cpuUsage",
+                "dataType": "Double"
+              },
+              {
+                "name": "memoryUsage",
+                "dataType": "Double"
+              },
+              {
+                "name": "podCount",
+                "dataType": "Int64"
+              },
+              {
+                "name": "healthStatus",
+                "dataType": "String"
+              }
+            ],
+            "measures": [
+              {
+                "name": "Avg Response Time",
+                "expression": "AVERAGE([responseTime])",
+                "formatString": "0.00ms"
+              },
+              {
+                "name": "Max Error Rate",
+                "expression": "MAX([errorRate])",
+                "formatString": "0.00%"
+              },
+              {
+                "name": "Total Requests/Sec",
+                "expression": "SUM([requestsPerSecond])",
+                "formatString": "#,0.00"
+              },
+              {
+                "name": "Healthy Services",
+                "expression": "CALCULATE(DISTINCTCOUNT([serviceName]), [healthStatus] = \"Healthy\")"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "DevOpsMetrics",
+        "defaultMode": "PushStreaming",
+        "tables": [
+          {
+            "name": "DeploymentMetrics",
+            "columns": [
+              {
+                "name": "timestamp",
+                "dataType": "DateTime"
+              },
+              {
+                "name": "pipelineName",
+                "dataType": "String"
+              },
+              {
+                "name": "environment",
+                "dataType": "String"
+              },
+              {
+                "name": "deploymentStatus",
+                "dataType": "String"
+              },
+              {
+                "name": "duration",
+                "dataType": "Double"
+              },
+              {
+                "name": "commitId",
+                "dataType": "String"
+              },
+              {
+                "name": "deployedBy",
+                "dataType": "String"
+              },
+              {
+                "name": "testsRun",
+                "dataType": "Int64"
+              },
+              {
+                "name": "testsPassed",
+                "dataType": "Int64"
+              },
+              {
+                "name": "codeCoverage",
+                "dataType": "Double"
+              }
+            ],
+            "measures": [
+              {
+                "name": "Deployment Success Rate",
+                "expression": "DIVIDE(COUNTROWS(FILTER(DeploymentMetrics, [deploymentStatus] = \"Success\")), COUNTROWS(DeploymentMetrics))",
+                "formatString": "0.00%"
+              },
+              {
+                "name": "Average Deployment Time",
+                "expression": "AVERAGE([duration])",
+                "formatString": "0.00 minutes"
+              },
+              {
+                "name": "Test Pass Rate",
+                "expression": "DIVIDE(SUM([testsPassed]), SUM([testsRun]))",
+                "formatString": "0.00%"
+              },
+              {
+                "name": "Average Code Coverage",
+                "expression": "AVERAGE([codeayCoverage])",
+                "formatString": "0.00%"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "retentionPolicy": {
+    "basicFIFO": {
+      "retentionDays": 30
+    }
+  },
+  "refreshSchedule": {
+    "enabled": false
+  },
+  "apiEndpoints": {
+    "orderMetrics": "https://api.powerbi.com/v1.0/myorg/datasets/{datasetId}/tables/RealTimeOrders/rows",
+    "serviceHealth": "https://api.powerbi.com/v1.0/myorg/datasets/{datasetId}/tables/ServiceMetrics/rows",
+    "devOpsMetrics": "https://api.powerbi.com/v1.0/myorg/datasets/{datasetId}/tables/DeploymentMetrics/rows"
+  },
+  "authentication": {
+    "type": "ServicePrincipal",
+    "tenantId": "{tenantId}",
+    "clientId": "{clientId}",
+    "clientSecret": "{clientSecret}"
+  }
+}
